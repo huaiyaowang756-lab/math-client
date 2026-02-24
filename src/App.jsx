@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { Input, Button, List, Spin, Empty, ConfigProvider, Select, Tooltip } from 'antd';
 import { SendOutlined, PaperClipOutlined, ThunderboltOutlined, AppstoreOutlined, AudioOutlined } from '@ant-design/icons';
-import { chat, listLLMModels } from './api';
+import { chatStream, listLLMModels, exportQuestionsDocx } from './api';
 import QuestionCard from './components/QuestionCard';
+import { parseGeneratedQuestion } from './utils/parseGeneratedQuestion';
 import './index.css';
 
 const { TextArea } = Input;
@@ -14,7 +15,29 @@ export default function App() {
   const [llmModels, setLLMModels] = useState([]);
   const [selectedLLM, setSelectedLLM] = useState(null);
   const [deepThink, setDeepThink] = useState(false);
+  const [downloadMode, setDownloadMode] = useState(null);
   const listRef = useRef(null);
+
+  const handleDownloadPaper = async (questions, mode = 'student') => {
+    const ids = (questions || [])
+      .map((q) => q.id)
+      .filter((id) => id && !String(id).startsWith('generated'));
+    if (!ids.length) return;
+    setDownloadMode(mode);
+    try {
+      const blob = await exportQuestionsDocx(ids, mode);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `试卷_${mode === 'teacher' ? '教师版' : mode === 'student' ? '学生版' : '普通版'}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDownloadMode(null);
+    }
+  };
 
   useEffect(() => {
     listLLMModels().then(setLLMModels).catch(() => setLLMModels([]));
@@ -32,23 +55,63 @@ export default function App() {
     setQuery('');
     setLoading(true);
 
-    try {
-      const res = await chat(q, 5, selectedLLM || null);
-      const qs = res?.questions || [];
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: res?.content ?? (qs.length > 0 ? `为您推荐了 ${qs.length} 道相关题目：` : '暂未找到匹配的题目，请尝试换一种描述方式。'),
-          questions: qs,
-        },
-      ]);
-    } catch (err) {
-      const msg = err.response?.data?.error || err.message || '推荐失败';
-      setMessages((prev) => [...prev, { role: 'assistant', content: `请求失败：${msg}` }]);
-    } finally {
-      setLoading(false);
-    }
+    const placeholder = { role: 'assistant', content: '正在处理...', questions: [] };
+    setMessages((prev) => [...prev, placeholder]);
+    const idx = messages.length + 1;
+    const intentRef = { current: '' };
+
+    chatStream(q, 5, selectedLLM || null, (evt) => {
+      if (evt.type === 'intent') {
+        intentRef.current = evt.intent || '';
+        const tips = {
+          generate_questions: '正在生成题目...',
+          recommend_questions: '正在为您推荐题目...',
+          assemble_paper: '正在组卷...',
+          chat: '正在思考...',
+        };
+        setMessages((prev) => {
+          const next = [...prev];
+          if (next[idx]) next[idx] = { ...next[idx], content: tips[evt.intent] || '正在处理...' };
+          return next;
+        });
+      } else if (evt.type === 'chunk') {
+        setMessages((prev) => {
+          const next = [...prev];
+          if (next[idx]) next[idx] = { ...next[idx], content: (next[idx].content || '') + (evt.content || '') };
+          return next;
+        });
+      } else if (evt.type === 'done') {
+        setMessages((prev) => {
+          const next = [...prev];
+          let content = evt.content ?? '';
+          let questions = evt.questions || [];
+          if (intentRef.current === 'generate_questions' && content) {
+            const parsed = parseGeneratedQuestion(content);
+            if (parsed && parsed.questionBody?.length > 0) {
+              questions = [{ id: 'generated', ...parsed }];
+              content = '已根据您的描述生成一道题目：';
+            }
+          }
+          next[idx] = { role: 'assistant', content, questions, intent: evt.intent };
+          return next;
+        });
+      } else if (evt.type === 'error') {
+        setMessages((prev) => {
+          const next = [...prev];
+          next[idx] = { role: 'assistant', content: `请求失败：${evt.error || '未知错误'}` };
+          return next;
+        });
+      }
+    })
+      .catch((err) => {
+        const msg = err?.message || '请求失败';
+        setMessages((prev) => {
+          const next = [...prev];
+          next[idx] = { role: 'assistant', content: `请求失败：${msg}` };
+          return next;
+        });
+      })
+      .finally(() => setLoading(false));
   };
 
   return (
@@ -107,6 +170,26 @@ export default function App() {
                       {m.questions.map((q) => (
                         <QuestionCard key={q.id} question={q} />
                       ))}
+                      {m.intent === 'assemble_paper' &&
+                        m.questions.some((q) => q.id && !String(q.id).startsWith('generated')) && (
+                        <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                          <Button
+                            type="primary"
+                            loading={downloadMode === 'student'}
+                            onClick={() => handleDownloadPaper(m.questions, 'student')}
+                            style={{ whiteSpace: 'nowrap' }}
+                          >
+                            下载试卷（学生版）
+                          </Button>
+                          <Button
+                            loading={downloadMode === 'teacher'}
+                            onClick={() => handleDownloadPaper(m.questions, 'teacher')}
+                            style={{ whiteSpace: 'nowrap' }}
+                          >
+                            下载试卷（教师版）
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </List.Item>
