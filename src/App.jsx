@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Input, Button, List, Spin, Empty, ConfigProvider, Select, Tooltip } from 'antd';
 import { SendOutlined, PaperClipOutlined, ThunderboltOutlined, AppstoreOutlined, AudioOutlined } from '@ant-design/icons';
-import { recommendQuestions, listLLMModels } from './api';
+import { chat, listLLMModels } from './api';
 import QuestionCard from './components/QuestionCard';
 import './index.css';
 
@@ -33,13 +33,13 @@ export default function App() {
     setLoading(true);
 
     try {
-      const res = await recommendQuestions(q, 5, selectedLLM || null);
+      const res = await chat(q, 5, selectedLLM || null);
       const qs = res?.questions || [];
       setMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
-          content: qs.length > 0 ? `为您推荐了 ${qs.length} 道相关题目：` : '暂未找到匹配的题目，请尝试换一种描述方式。',
+          content: res?.content ?? (qs.length > 0 ? `为您推荐了 ${qs.length} 道相关题目：` : '暂未找到匹配的题目，请尝试换一种描述方式。'),
           questions: qs,
         },
       ]);
@@ -114,7 +114,7 @@ export default function App() {
             />
             {loading && (
               <div style={{ textAlign: 'center', padding: 24 }}>
-                <Spin tip="正在为您推荐题目..." />
+                <Spin tip="正在处理..." />
               </div>
             )}
         </div>
